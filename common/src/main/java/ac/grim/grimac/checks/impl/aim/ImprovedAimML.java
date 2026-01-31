@@ -325,29 +325,86 @@ public class ImprovedAimML extends Check implements RotationCheck {
     }
 
     /**
-     * Извлечение признаков из последовательности тиков
-     */
-    /**
-     * Извлечение признаков из последовательности тиков (8 фичей - per-tick)
-     * ИСПРАВЛЕНО: Извлекаем только 8 фичей для совместимости с обученной моделью
+     * Извлечение признаков из последовательности тиков (24 фичи)
      */
     private double[] extractFeatures(List<TickData> ticks) {
-        double[] features = new double[8]; // 8 фичей - как в обучающей выборке
+        double[] features = new double[24]; // 24 фичи
 
         if (ticks.isEmpty()) return features;
 
-        // Берём последний тик как representative sample (как в обучении)
-        TickData lastTick = ticks.get(ticks.size() - 1);
+        List<Double> deltaYaws = new ArrayList<>();
+        List<Double> deltaPitches = new ArrayList<>();
+        List<Double> accelYaws = new ArrayList<>();
+        List<Double> accelPitches = new ArrayList<>();
+        List<Double> gcdErrorsYaw = new ArrayList<>();
+        List<Double> gcdErrorsPitch = new ArrayList<>();
 
-        // Feature 0-7: Per-tick features (как в CSV)
-        features[0] = Math.abs(lastTick.deltaYaw);
-        features[1] = Math.abs(lastTick.deltaPitch);
-        features[2] = Math.abs(lastTick.accelYaw);
-        features[3] = Math.abs(lastTick.accelPitch);
-        features[4] = Math.abs(lastTick.jerkYaw);
-        features[5] = Math.abs(lastTick.jerkPitch);
-        features[6] = lastTick.gcdErrorYaw;
-        features[7] = lastTick.gcdErrorPitch;
+        for (TickData tick : ticks) {
+            deltaYaws.add((double) Math.abs(tick.deltaYaw));
+            deltaPitches.add((double) Math.abs(tick.deltaPitch));
+            accelYaws.add((double) Math.abs(tick.accelYaw));
+            accelPitches.add((double) Math.abs(tick.accelPitch));
+            gcdErrorsYaw.add((double) tick.gcdErrorYaw);
+            gcdErrorsPitch.add((double) tick.gcdErrorPitch);
+        }
+
+        // Feature 0-1: Средняя скорость
+        features[0] = average(deltaYaws);
+        features[1] = average(deltaPitches);
+
+        // Feature 2-3: Стандартное отклонение скорости
+        features[2] = standardDeviation(deltaYaws);
+        features[3] = standardDeviation(deltaPitches);
+
+        // Feature 4-5: Максимальная скорость
+        features[4] = deltaYaws.isEmpty() ? 0 : Collections.max(deltaYaws);
+        features[5] = deltaPitches.isEmpty() ? 0 : Collections.max(deltaPitches);
+
+        // Feature 6-7: Среднее ускорение
+        features[6] = average(accelYaws);
+        features[7] = average(accelPitches);
+
+        // Feature 8-9: Стандартное отклонение ускорения
+        features[8] = standardDeviation(accelYaws);
+        features[9] = standardDeviation(accelPitches);
+
+        // Feature 10-11: Средняя GCD-ошибка
+        features[10] = average(gcdErrorsYaw);
+        features[11] = average(gcdErrorsPitch);
+
+        // Feature 12: Процент нулевых движений
+        features[12] = deltaYaws.stream().filter(d -> d < 0.01).count() / (double) deltaYaws.size();
+
+        // Feature 13: Процент резких движений (>20 градусов)
+        features[13] = deltaYaws.stream().filter(d -> d > 20).count() / (double) deltaYaws.size();
+
+        // Feature 14: Энтропия движений
+        features[14] = calculateEntropy(deltaYaws);
+
+        // Feature 15: Коэффициент вариации
+        features[15] = features[2] / (features[0] + 0.001);
+
+        // Feature 16: Паттерн "снапа"
+        features[16] = detectSnapPattern(deltaYaws);
+
+        // Feature 17-18: Квантили (25% и 75%)
+        features[17] = percentile(deltaYaws, 0.25);
+        features[18] = percentile(deltaYaws, 0.75);
+
+        // Feature 19: Константная скорость
+        features[19] = detectConstantSpeedPattern(deltaYaws);
+
+        // Feature 20: Корреляция yaw/pitch
+        features[20] = calculateCorrelation(deltaYaws, deltaPitches);
+
+        // Feature 21: Среднее соотношение GCD-ошибки к движению
+        features[21] = features[10] / (features[0] + 0.001);
+
+        // Feature 22: Максимальное ускорение
+        features[22] = accelYaws.isEmpty() ? 0 : Collections.max(accelYaws);
+
+        // Feature 23: Процент идеально прямых углов
+        features[23] = countPerfectAngles(ticks) / (double) ticks.size();
 
         // Проверка на NaN/Infinity
         for (int i = 0; i < features.length; i++) {
@@ -362,18 +419,18 @@ public class ImprovedAimML extends Check implements RotationCheck {
 
     // ========== УТИЛИТЫ ДЛЯ СТАТИСТИКИ ==========
 
-    private double average(List<Double> values) {
+    private static double average(List<Double> values) {
         return values.isEmpty() ? 0 : values.stream().mapToDouble(Double::doubleValue).average().orElse(0);
     }
 
-    private double standardDeviation(List<Double> values) {
+    private static double standardDeviation(List<Double> values) {
         if (values.size() < 2) return 0;
         double avg = average(values);
         double variance = values.stream().mapToDouble(v -> Math.pow(v - avg, 2)).sum() / values.size();
         return Math.sqrt(variance);
     }
 
-    private double calculateEntropy(List<Double> values) {
+    private static double calculateEntropy(List<Double> values) {
         Map<Integer, Long> histogram = values.stream()
                 .collect(Collectors.groupingBy(v -> (int)(v / 5), Collectors.counting()));
         double total = values.size();
@@ -385,7 +442,7 @@ public class ImprovedAimML extends Check implements RotationCheck {
         return entropy;
     }
 
-    private double detectSnapPattern(List<Double> deltas) {
+    private static double detectSnapPattern(List<Double> deltas) {
         int snapCount = 0;
         for (int i = 1; i < deltas.size() - 1; i++) {
             if (deltas.get(i) > 15 && deltas.get(i + 1) < 2) {
@@ -395,7 +452,7 @@ public class ImprovedAimML extends Check implements RotationCheck {
         return snapCount / (double) deltas.size();
     }
 
-    private double percentile(List<Double> values, double p) {
+    private static double percentile(List<Double> values, double p) {
         if (values.isEmpty()) return 0;
         List<Double> sorted = new ArrayList<>(values);
         Collections.sort(sorted);
@@ -403,7 +460,7 @@ public class ImprovedAimML extends Check implements RotationCheck {
         return sorted.get(Math.max(0, Math.min(index, sorted.size() - 1)));
     }
 
-    private double detectConstantSpeedPattern(List<Double> deltas) {
+    private static double detectConstantSpeedPattern(List<Double> deltas) {
         if (deltas.size() < 5) return 0;
         int constantCount = 0;
         for (int i = 0; i < deltas.size() - 4; i++) {
@@ -421,7 +478,7 @@ public class ImprovedAimML extends Check implements RotationCheck {
         return constantCount / (double) (deltas.size() - 4);
     }
 
-    private double calculateCorrelation(List<Double> x, List<Double> y) {
+    private static double calculateCorrelation(List<Double> x, List<Double> y) {
         if (x.size() != y.size() || x.size() < 2) return 0;
         double avgX = average(x);
         double avgY = average(y);
@@ -451,6 +508,19 @@ public class ImprovedAimML extends Check implements RotationCheck {
         return count;
     }
 
+    /**
+     * Считает идеально прямые углы для обучения (статическая версия для deltas)
+     */
+    private static double countPerfectAnglesFromDeltas(List<Double> deltas) {
+        long count = 0;
+        for (double y : deltas) {
+            if (Math.abs(y % 90) < 0.1 || Math.abs(y) < 0.1) {
+                count++;
+            }
+        }
+        return count;
+    }
+
     private void alertWithPermission(String message) {
         for (GrimPlayer online : ac.grim.grimac.GrimAPI.INSTANCE.getPlayerDataManager().getEntries()) {
             if (online.hasPermission("grim.alerts")) {
@@ -461,6 +531,19 @@ public class ImprovedAimML extends Check implements RotationCheck {
     }
 
     // ========== КЛАССЫ ДАННЫХ ==========
+
+    /**
+     * Сырой обучающий тик (из CSV)
+     */
+    public static class RawTrainingTick implements Serializable {
+        private static final long serialVersionUID = 1L;
+
+        public float deltaYaw, deltaPitch;
+        public float accelYaw, accelPitch;
+        public float jerkYaw, jerkPitch;
+        public float gcdErrorYaw, gcdErrorPitch;
+        public double isCheat;
+    }
 
     /**
      * Расширенный тик с дополнительными метриками
@@ -821,6 +904,129 @@ public class ImprovedAimML extends Check implements RotationCheck {
     }
 
     /**
+     * Вычислить 24 фичи из сырых тиков для обучения
+     * Группирует тики по 40 и вычисляет статистики
+     */
+    private static List<AimModel_SMART.TrainingExample> compute24FeaturesFromRawTicks(List<RawTrainingTick> rawTicks) {
+        List<AimModel_SMART.TrainingExample> trainingExamples = new ArrayList<>();
+
+        // Разбиваем тики на окна по 40
+        int windowSize = 40;
+        int numWindows = rawTicks.size() / windowSize;
+
+        for (int i = 0; i < numWindows; i++) {
+            int startIdx = i * windowSize;
+            int endIdx = startIdx + windowSize;
+            List<RawTrainingTick> window = rawTicks.subList(startIdx, endIdx);
+
+            // Вычисляем 24 фичи
+            double[] features = new double[24];
+
+            List<Double> deltaYaws = new ArrayList<>();
+            List<Double> deltaPitches = new ArrayList<>();
+            List<Double> accelYaws = new ArrayList<>();
+            List<Double> accelPitches = new ArrayList<>();
+            List<Double> gcdErrorsYaw = new ArrayList<>();
+            List<Double> gcdErrorsPitch = new ArrayList<>();
+
+            for (RawTrainingTick tick : window) {
+                deltaYaws.add((double) Math.abs(tick.deltaYaw));
+                deltaPitches.add((double) Math.abs(tick.deltaPitch));
+                accelYaws.add((double) Math.abs(tick.accelYaw));
+                accelPitches.add((double) Math.abs(tick.accelPitch));
+                gcdErrorsYaw.add((double) tick.gcdErrorYaw);
+                gcdErrorsPitch.add((double) tick.gcdErrorPitch);
+            }
+
+            // Feature 0-1: Средняя скорость
+            features[0] = average(deltaYaws);
+            features[1] = average(deltaPitches);
+
+            // Feature 2-3: Стандартное отклонение скорости
+            features[2] = standardDeviation(deltaYaws);
+            features[3] = standardDeviation(deltaPitches);
+
+            // Feature 4-5: Максимальная скорость
+            features[4] = deltaYaws.isEmpty() ? 0 : Collections.max(deltaYaws);
+            features[5] = deltaPitches.isEmpty() ? 0 : Collections.max(deltaPitches);
+
+            // Feature 6-7: Среднее ускорение
+            features[6] = average(accelYaws);
+            features[7] = average(accelPitches);
+
+            // Feature 8-9: Стандартное отклонение ускорения
+            features[8] = standardDeviation(accelYaws);
+            features[9] = standardDeviation(accelPitches);
+
+            // Feature 10-11: Средняя GCD-ошибка
+            features[10] = average(gcdErrorsYaw);
+            features[11] = average(gcdErrorsPitch);
+
+            // Feature 12: Процент нулевых движений
+            features[12] = deltaYaws.stream().filter(d -> d < 0.01).count() / (double) deltaYaws.size();
+
+            // Feature 13: Процент резких движений (>20 градусов)
+            features[13] = deltaYaws.stream().filter(d -> d > 20).count() / (double) deltaYaws.size();
+
+            // Feature 14: Энтропия движений
+            features[14] = calculateEntropy(deltaYaws);
+
+            // Feature 15: Коэффициент вариации
+            features[15] = features[2] / (features[0] + 0.001);
+
+            // Feature 16: Паттерн "снапа"
+            features[16] = detectSnapPattern(deltaYaws);
+
+            // Feature 17-18: Квантили (25% и 75%)
+            features[17] = percentile(deltaYaws, 0.25);
+            features[18] = percentile(deltaYaws, 0.75);
+
+            // Feature 19: Константная скорость
+            features[19] = detectConstantSpeedPattern(deltaYaws);
+
+            // Feature 20: Корреляция yaw/pitch
+            features[20] = calculateCorrelation(deltaYaws, deltaPitches);
+
+            // Feature 21: Среднее соотношение GCD-ошибки к движению
+            features[21] = features[10] / (features[0] + 0.001);
+
+            // Feature 22: Максимальное ускорение
+            features[22] = accelYaws.isEmpty() ? 0 : Collections.max(accelYaws);
+
+            // Feature 23: Процент идеально прямых углов (используем deltaYaws)
+            features[23] = countPerfectAnglesFromDeltas(deltaYaws) / (double) deltaYaws.size();
+
+            // Берём метку (cheat или legit) из последнего тика в окне
+            double label = window.get(window.size() - 1).isCheat;
+
+            // Проверка на NaN/Infinity
+            for (int j = 0; j < features.length; j++) {
+                if (Double.isNaN(features[j]) || Double.isInfinite(features[j])) {
+                    features[j] = 0.0;
+                }
+            }
+
+            trainingExamples.add(new AimModel_SMART.TrainingExample(features, label));
+        }
+
+        System.out.println("[GrimAC ML] Вычислено обучающих примеров: " + trainingExamples.size() + " из " + rawTicks.size() + " тиков");
+        return trainingExamples;
+    }
+
+    /**
+     * Считает идеально прямые углы для обучения
+     */
+    private static double countPerfectAnglesFromDeltas(List<Double> deltas) {
+        long count = 0;
+        for (double y : deltas) {
+            if (Math.abs(y % 90) < 0.1 || Math.abs(y) < 0.1) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
      * Обучить модель
      */
     public static String trainModel() {
@@ -840,12 +1046,13 @@ public class ImprovedAimML extends Check implements RotationCheck {
             System.out.println("[GrimAC ML] ═══════════════════════════════════");
             System.out.println("[GrimAC ML] Найдено файлов: " + csvFiles.length);
 
-            // Загружаем все данные
-            List<AimModel_SMART.TrainingExample> allData = new ArrayList<>();
+            // Загружаем все данные (raw тики для вычисления 24 фичей)
+            List<RawTrainingTick> allRawData = new ArrayList<>();
             int legitCount = 0;
             int cheatCount = 0;
 
             for (File csvFile : csvFiles) {
+                boolean isCheatFile = csvFile.getName().startsWith("CHEAT_");
                 System.out.println("[GrimAC ML] Загрузка: " + csvFile.getName());
 
                 try (BufferedReader br = new BufferedReader(new FileReader(csvFile))) {
@@ -860,17 +1067,21 @@ public class ImprovedAimML extends Check implements RotationCheck {
                         if (parts.length < 9) continue; // Минимум 9 колонок
 
                         try {
-                            // Парсим данные
-                            double label = Double.parseDouble(parts[0]); // 0 или 1
-                            double[] features = new double[parts.length - 1];
+                            // Парсим данные (8 колонок + label)
+                            RawTrainingTick tick = new RawTrainingTick();
+                            tick.isCheat = isCheatFile ? 1.0 : 0.0;
+                            tick.deltaYaw = Float.parseFloat(parts[0]);
+                            tick.deltaPitch = Float.parseFloat(parts[1]);
+                            tick.accelYaw = Float.parseFloat(parts[2]);
+                            tick.accelPitch = Float.parseFloat(parts[3]);
+                            tick.jerkYaw = Float.parseFloat(parts[4]);
+                            tick.jerkPitch = Float.parseFloat(parts[5]);
+                            tick.gcdErrorYaw = Float.parseFloat(parts[6]);
+                            tick.gcdErrorPitch = Float.parseFloat(parts[7]);
 
-                            for (int i = 1; i < parts.length; i++) {
-                                features[i - 1] = Double.parseDouble(parts[i]);
-                            }
+                            allRawData.add(tick);
 
-                            allData.add(new AimModel_SMART.TrainingExample(features, label));
-
-                            if (label > 0.5) {
+                            if (tick.isCheat > 0.5) {
                                 cheatCount++;
                             } else {
                                 legitCount++;
@@ -889,6 +1100,9 @@ public class ImprovedAimML extends Check implements RotationCheck {
                     e.printStackTrace();
                 }
             }
+
+            // Группируем тики по игрокам для расчёта 24 фичей
+            List<AimModel_SMART.TrainingExample> allData = compute24FeaturesFromRawTicks(allRawData);
 
             if (allData.isEmpty()) {
                 return "§c[GrimAC ML] Не удалось загрузить данные из CSV!";
