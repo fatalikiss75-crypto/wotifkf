@@ -7,7 +7,10 @@ import java.util.concurrent.*;
 import java.util.stream.*;
 
 /**
- * УЛУЧШЕННАЯ утилита для диагностики баланса ML датасета
+ * Утилита для диагностики ML датасета (РЕГРЕССИОННАЯ МОДЕЛЬ)
+ *
+ * ВАЖНО: Для регрессионной модели используется ТОЛЬКО легитные данные!
+ * Читерские данные не нужны для обучения - модель изучает человеческую моторику.
  *
  * КРИТИЧЕСКИЕ УЛУЧШЕНИЯ:
  * 1. ✅ Stream API вместо BufferedReader для подсчета строк (10x faster)
@@ -16,8 +19,8 @@ import java.util.stream.*;
  * 4. ✅ Детальная статистика и рекомендации
  * 5. ✅ Memory-efficient обработка больших файлов
  *
- * @author ImprovedAImML Team
- * @version 2.0 (оптимизировано на базе MLSAC)
+ * @author GrimAC ML Team
+ * @version 3.0 (Regression Edition)
  */
 public class DatasetBalanceChecker {
 
@@ -188,10 +191,10 @@ public class DatasetBalanceChecker {
         analyzeFileCount(sb, legitCount, cheatCount);
 
         // Анализ баланса сэмплов
-        analyzeBalance(sb, legitPercent, cheatPercent, legitCount, cheatCount);
+        analyzeBalance(sb, legitPercent, cheatPercent, legitSamples, cheatSamples);
 
-        // Анализ минимального количества данных
-        analyzeDataQuantity(sb, totalSamples, legitSamples, cheatSamples);
+        // Анализ минимального количества данных (не нужен для регрессии, используется только легит)
+        // analyzeDataQuantity(sb, totalSamples, legitSamples, cheatSamples);
 
         // НОВОЕ: Детальная статистика по файлам
         analyzeFileStatistics(sb, legitFiles, cheatFiles);
@@ -200,57 +203,51 @@ public class DatasetBalanceChecker {
     }
 
     /**
-     * НОВОЕ: Анализ количества файлов
+     * НОВОЕ: Анализ количества файлов (для регрессионной модели)
      */
     private static void analyzeFileCount(StringBuilder sb, int legitCount, int cheatCount) {
         if (legitCount == 0) {
             sb.append("§c❌ КРИТИЧНО: Нет легитных датасетов!\n");
+            sb.append("§e   Регрессионная модель обучается только на легит данных!\n");
             sb.append("§e   Соберите минимум 5 легитных датасетов через:\n");
-            sb.append("§e   /grimAiGlobal start legit_players\n\n");
-        } else if (cheatCount == 0) {
-            sb.append("§c❌ КРИТИЧНО: Нет читерских датасетов!\n");
-            sb.append("§e   Соберите минимум 5 читерских датасетов\n\n");
+            sb.append("§e   /grimAiGlobal start <id>\n\n");
+        } else if (legitCount < 5) {
+            sb.append("§e⚠ НЕДОСТАТОЧНО: ")
+                    .append(legitCount)
+                    .append(" легитных датасетов (рекомендуется 5+)\n\n");
+        } else {
+            sb.append("§a✓ ХОРОШО: ")
+                    .append(legitCount)
+                    .append(" легитных датасетов\n");
+            sb.append("§e   Читерских датасетов: ")
+                    .append(cheatCount)
+                    .append(" (не используются для обучения регрессии)\n\n");
         }
     }
 
     /**
-     * НОВОЕ: Анализ баланса сэмплов
+     * НОВОЕ: Анализ количества сэмплов (для регрессионной модели)
      */
     private static void analyzeBalance(StringBuilder sb, double legitPercent, double cheatPercent,
-                                       int legitCount, int cheatCount) {
-        if (legitPercent < 35) {
-            sb.append("§c⚠ ДИСБАЛАНС: Слишком мало легитных данных (")
-                    .append(String.format("%.1f%%", legitPercent))
-                    .append(")!\n");
-            sb.append("§e   Модель будет считать всех читерами!\n");
-            sb.append("§a   ✓ Решение: Соберите ещё ")
-                    .append(Math.max(1, 5 - legitCount))
-                    .append(" легитных датасетов\n\n");
-
-        } else if (legitPercent > 65) {
-            sb.append("§c⚠ ДИСБАЛАНС: Слишком мало читерских данных (")
-                    .append(String.format("%.1f%%", cheatPercent))
-                    .append(")!\n");
-            sb.append("§e   Модель будет пропускать читеров!\n");
-            sb.append("§a   ✓ Решение: Соберите ещё ")
-                    .append(Math.max(1, 5 - cheatCount))
-                    .append(" читерских датасетов\n\n");
-
-        } else if (legitPercent >= 40 && legitPercent <= 60) {
-            sb.append("§a✓ ОТЛИЧНО: Баланс данных идеален! (")
-                    .append(String.format("%.1f%%", legitPercent))
-                    .append(" легит / ")
-                    .append(String.format("%.1f%%", cheatPercent))
-                    .append(" чит)\n");
+                                       long legitSamples, long cheatSamples) {
+        // Для регрессии нам нужно МНОГО легит данных
+        if (legitSamples == 0) {
+            sb.append("§c❌ КРИТИЧНО: Нет легитных сэмплов!\n");
+        } else if (legitSamples < 500) {
+            sb.append("§c⚠ МАЛО ЛЕГИТНЫХ ДАННЫХ: ")
+                    .append(legitSamples)
+                    .append(" сэмплов (минимум 500)\n");
+            sb.append("§e   Модель может быть неточной!\n\n");
+        } else if (legitSamples < 2000) {
+            sb.append("§e⚠ ДОСТАТОЧНО: ")
+                    .append(legitSamples)
+                    .append(" легитных сэмплов (рекомендуется 2000+)\n");
             sb.append("§a   Можно обучать модель: /grimAiTrain\n\n");
-
         } else {
-            sb.append("§e⚠ ДОПУСТИМО: Баланс приемлемый (")
-                    .append(String.format("%.1f%%", legitPercent))
-                    .append(" легит / ")
-                    .append(String.format("%.1f%%", cheatPercent))
-                    .append(" чит)\n");
-            sb.append("§e   Можно обучать, но лучше собрать ещё данных\n\n");
+            sb.append("§a✓ ОТЛИЧНО: ")
+                    .append(legitSamples)
+                    .append(" легитных сэмплов!\n");
+            sb.append("§a   Можно обучать качественную модель: /grimAiTrain\n\n");
         }
     }
 
@@ -408,40 +405,37 @@ public class DatasetBalanceChecker {
         }
 
         public boolean isBalanced() {
-            long total = legitSamples + cheatSamples;
-            if (total == 0) return false;
-
-            double legitPercent = (legitSamples * 100.0) / total;
-            return legitPercent >= 40 && legitPercent <= 60;
+            // Для регрессионной модели нам не нужен баланс легит/чит
+            // Нам нужно просто много легит данных
+            return legitSamples >= 2000;
         }
 
         public boolean hasEnoughData() {
-            return (legitSamples + cheatSamples) >= 500;
+            // Для регрессии нужна только легит данные
+            return legitSamples >= 500;
         }
 
         public boolean canTrain() {
-            return legitDatasets >= 3 && cheatDatasets >= 3 && hasEnoughData();
+            // Для регрессии нужна только легит данные (минимум 3 датасета)
+            return legitDatasets >= 3 && legitSamples >= 500;
         }
 
         /**
-         * НОВОЕ: Получить качество датасета (0-100)
+         * НОВОЕ: Получить качество датасета (0-100) - для регрессионной модели
          */
         public int getQualityScore() {
             int score = 0;
 
-            // 40 баллов за количество файлов
-            if (legitDatasets >= 5 && cheatDatasets >= 5) score += 40;
-            else if (legitDatasets >= 3 && cheatDatasets >= 3) score += 20;
+            // 50 баллов за количество легитных файлов
+            if (legitDatasets >= 10) score += 50;
+            else if (legitDatasets >= 5) score += 35;
+            else if (legitDatasets >= 3) score += 20;
 
-            // 30 баллов за баланс
-            if (isBalanced()) score += 30;
-            else if (canTrain()) score += 15;
-
-            // 30 баллов за количество сэмплов
-            long total = legitSamples + cheatSamples;
-            if (total >= 2000) score += 30;
-            else if (total >= 1000) score += 20;
-            else if (total >= 500) score += 10;
+            // 50 баллов за количество легитных сэмплов
+            if (legitSamples >= 5000) score += 50;
+            else if (legitSamples >= 2000) score += 40;
+            else if (legitSamples >= 1000) score += 25;
+            else if (legitSamples >= 500) score += 10;
 
             return score;
         }

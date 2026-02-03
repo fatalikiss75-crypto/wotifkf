@@ -41,30 +41,35 @@ public class ImprovedAimML extends Check implements RotationCheck {
 
     // ========== КОНСТАНТЫ ==========
     private static final int SEQUENCE_LENGTH = 40; // Длина последовательности для анализа
+    private static final int NUM_FEATURES = 8; // Количество фичей на тик
     private static final int MIN_SAMPLES_FOR_TRAINING = 500; // Минимум сэмплов для обучения
-    private static final double CHEAT_THRESHOLD = 0.88;      // Было 0.70 → 0.88
-    private static final double ALERT_THRESHOLD = 0.93;      // Было 0.75 → 0.93
-    private static final double FLAG_VL = 20.0;              // Было 5.0 → 20.0
+
+    // Регрессия: пороги по предсказуемости (чем меньше ошибка, тем более читерски)
+    private static final double PREDICT_ERROR_HIGH = 0.5;      // Высокая ошибка = легит
+    private static final double PREDICT_ERROR_LOW = 0.05;      // Низкая ошибка = возможно чит
+    private static final double PREDICT_ERROR_CRITICAL = 0.02; // Критически низкая ошибка = точно чит
+    private static final double FLAG_VL = 20.0;
     private static final double KICK_VL = 60.0;
     private static final String DATASET_DIR = "plugins/GrimAC/ml_datasets/";
     private static final String MODEL_FILE = "plugins/GrimAC/ml_models/aim_model.dat";
+    private static final String MODEL_JSON_FILE = "plugins/GrimAC/ml_models/aim_model_weights.json";
 
     // ========== ГЛОБАЛЬНОЕ ХРАНИЛИЩЕ ==========
     @Getter
     private static final Map<UUID, DataCollector> activeCollectors = new ConcurrentHashMap<>();
     @Getter
     private static String globalCollectionId = null; // ID глобального сбора
-    private static AimModel_SMART trainedModel = null;
+    private static SmartAimModel trainedModel = null;
 
     // ========== ДАННЫЕ ИГРОКА ==========
     private final Deque<TickData> tickHistory = new ArrayDeque<>(SEQUENCE_LENGTH);
-    private double currentCheatProbability = 0.0;
+    private double currentPredictionError = 0.0; // Ошибка предсказания (чем меньше, тем более читерски)
     private double violationLevel = 0.0;
     private long lastVLUpdate = System.currentTimeMillis();
     private int ticksSinceLastAnalysis = 0;
     private long lastVLDecay = System.currentTimeMillis();
     private int totalAnalyses = 0;
-    private int highProbabilityDetections = 0;
+    private int highPredictabilityDetections = 0;
 
     // Для вычисления производных
     private float lastDeltaYaw = 0.0f;
@@ -238,8 +243,9 @@ public class ImprovedAimML extends Check implements RotationCheck {
     }
 
     /**
-     * Анализ последовательности тиков через ML-модель
-     * ИСПРАВЛЕНО: Исправлен расчёт фичей (8 вместо 24)
+     * Анализ последовательности тиков через ML-модель (регрессия)
+     * Модель предсказывает следующий deltaYaw/deltaPitch
+     * Чем меньше ошибка предсказания, тем более читерски (слишком предсказуемо)
      */
     private void analyzeSequence() {
         if (trainedModel == null || tickHistory.size() < SEQUENCE_LENGTH) {
@@ -260,33 +266,50 @@ public class ImprovedAimML extends Check implements RotationCheck {
             return;
         }
 
+        // Конвертируем историю в последовательность [40][8]
+        double[][] sequence = tickHistoryToSequence();
+
+        // Получаем следующий тик (реальный) для сравнения
         List<TickData> tickList = new ArrayList<>(tickHistory);
-        double[] features = extractFeatures(tickList);
+        double realDeltaYaw = tickList.get(tickList.size() - 1).deltaYaw;
+        double realDeltaPitch = tickList.get(tickList.size() - 1).deltaPitch;
 
-        double probability = trainedModel.predict(features);
-        currentCheatProbability = probability;
+        // Предсказываем следующий тик
+        double[] predicted = trainedModel.predict(sequence);
+        double predictedDeltaYaw = predicted[0];
+        double predictedDeltaPitch = predicted[1];
 
-        // Добавляем в голограмму/GUI
-        MLBridgeHolder.getBridge().addStrike(player.uuid, probability);
+        // Вычисляем ошибку предсказания
+        double yawError = Math.abs(predictedDeltaYaw - realDeltaYaw);
+        double pitchError = Math.abs(predictedDeltaPitch - realDeltaPitch);
+        double predictionError = yawError + pitchError;
+        currentPredictionError = predictionError;
+
+        // Добавляем в голограмму/GUI (инвертированное значение: чем меньше ошибка, тем больше "strike")
+        // Нормализуем для отображения: 0 ошибка = 100% чит, 0.5 ошибка = 0% чит
+        double cheatScore = Math.max(0, Math.min(100, (1.0 - (predictionError / PREDICT_ERROR_HIGH)) * 100));
+        MLBridgeHolder.getBridge().addStrike(player.uuid, cheatScore);
 
         totalAnalyses++;
-        if (probability >= CHEAT_THRESHOLD) {
-            highProbabilityDetections++;
+        if (predictionError <= PREDICT_ERROR_LOW) {
+            highPredictabilityDetections++;
         }
 
-        if (probability >= ALERT_THRESHOLD) {
+        // Если ошибка слишком маленькая (слишком предсказуемо) -> возможно чит
+        if (predictionError <= PREDICT_ERROR_CRITICAL) {
             long now = System.currentTimeMillis();
             long timeSinceLastUpdate = now - lastVLUpdate;
 
             if (timeSinceLastUpdate >= 2000) {
-                double vlIncrease = (probability - ALERT_THRESHOLD) * 1.5;
+                // Чем меньше ошибка, тем больше VL
+                double vlIncrease = (PREDICT_ERROR_CRITICAL - predictionError) * 50;
                 violationLevel += vlIncrease;
                 lastVLUpdate = now;
 
                 if (violationLevel >= FLAG_VL) {
                     String verbose = String.format(
-                            "ML=%.0f%% VL=%.1f avg=%.1f°",
-                            probability * 100,
+                            "PredErr=%.4f° VL=%.1f avg=%.1f°",
+                            predictionError,
                             violationLevel,
                             avgMovement
                     );
@@ -294,38 +317,37 @@ public class ImprovedAimML extends Check implements RotationCheck {
                     this.flagAndAlert(verbose);
                 }
             }
-        } else {
-            if (probability < CHEAT_THRESHOLD * 0.7) {
-                violationLevel = Math.max(0, violationLevel - 0.3);
-            }
+        } else if (predictionError >= PREDICT_ERROR_HIGH) {
+            // Высокая ошибка = легит, снижаем VL
+            violationLevel = Math.max(0, violationLevel - 0.3);
         }
     }
+
     /**
-     * Обновление Violation Level
+     * Конвертировать историю тиков в последовательность [40][8]
      */
-    private void updateViolationLevel(double probability) {
-        long now = System.currentTimeMillis();
-        long delta = now - lastVLUpdate;
+    private double[][] tickHistoryToSequence() {
+        double[][] sequence = new double[SEQUENCE_LENGTH][NUM_FEATURES];
+        int idx = 0;
 
-        // Decay со временем
-        if (delta > 1000) {
-            double decay = (delta / 1000.0) * 0.05;
-            violationLevel = Math.max(0.0, violationLevel - decay);
+        for (TickData tick : tickHistory) {
+            sequence[idx][0] = tick.deltaYaw;
+            sequence[idx][1] = tick.deltaPitch;
+            sequence[idx][2] = tick.accelYaw;
+            sequence[idx][3] = tick.accelPitch;
+            sequence[idx][4] = tick.jerkYaw;
+            sequence[idx][5] = tick.jerkPitch;
+            sequence[idx][6] = tick.gcdErrorYaw;
+            sequence[idx][7] = tick.gcdErrorPitch;
+            idx++;
         }
-        lastVLUpdate = now;
 
-        // Увеличиваем VL если вероятность высокая
-        if (probability > CHEAT_THRESHOLD) {
-            double multiplier = 1.0 + (probability - CHEAT_THRESHOLD) * 3.0;
-            violationLevel += 0.8 * multiplier;
-        } else {
-            // Снижаем VL при легитной игре
-            violationLevel = Math.max(0.0, violationLevel - 0.05);
-        }
+        return sequence;
     }
-
     /**
      * Извлечение признаков из последовательности тиков (24 фичи)
+     * ОСТАВЛЕНО ДЛЯ СОВМЕСТИМОСТИ, больше не используется для обучения
+     * Для обучения теперь используется tickHistoryToSequence() напрямую
      */
     private double[] extractFeatures(List<TickData> ticks) {
         double[] features = new double[24]; // 24 фичи
@@ -868,11 +890,17 @@ public class ImprovedAimML extends Check implements RotationCheck {
      */
     public static String getStatus(GrimPlayer player) {
         StringBuilder sb = new StringBuilder();
-        sb.append("§b§l[GrimAC ML Status - ").append(player.getName()).append("]\n");
+        sb.append("§b§l[GrimAC ML Regression Status - ").append(player.getName()).append("]\n");
         sb.append("§7════════════════════════════════════\n");
 
         sb.append(String.format("§7Модель: %s\n",
                 trainedModel != null ? "§a✓ Загружена" : "§c✗ Не обучена"));
+
+        if (trainedModel != null) {
+            sb.append(String.format("  §7Valid MSE: §e%.6f\n", trainedModel.getValidationMSE()));
+            sb.append(String.format("  §7Valid MAE: §e%.6f\n", trainedModel.getValidationMAE()));
+        }
+
         sb.append(String.format("§7Активных записей: §e%d\n", activeCollectors.size()));
         sb.append(String.format("§7Глобальный сбор: %s\n",
                 globalCollectionId != null ? "§a✓ " + globalCollectionId : "§c✗ Не активен"));
@@ -904,119 +932,66 @@ public class ImprovedAimML extends Check implements RotationCheck {
     }
 
     /**
-     * Вычислить 24 фичи из сырых тиков для обучения
-     * Группирует тики по 40 и вычисляет статистики
+     * Вычислить обучающие примеры для регрессии из сырых тиков
+     * Создаёт окна по 40 тиков и предсказывает следующий тик
      */
-    private static List<AimModel_SMART.TrainingExample> compute24FeaturesFromRawTicks(List<RawTrainingTick> rawTicks) {
-        List<AimModel_SMART.TrainingExample> trainingExamples = new ArrayList<>();
+    private static List<SmartAimModel.TrainingExample> computeRegressionExamplesFromRawTicks(List<RawTrainingTick> rawTicks) {
+        List<SmartAimModel.TrainingExample> trainingExamples = new ArrayList<>();
 
-        // Разбиваем тики на окна по 40
-        int windowSize = 40;
-        int numWindows = rawTicks.size() / windowSize;
-
-        for (int i = 0; i < numWindows; i++) {
-            int startIdx = i * windowSize;
-            int endIdx = startIdx + windowSize;
-            List<RawTrainingTick> window = rawTicks.subList(startIdx, endIdx);
-
-            // Вычисляем 24 фичи
-            double[] features = new double[24];
-
-            List<Double> deltaYaws = new ArrayList<>();
-            List<Double> deltaPitches = new ArrayList<>();
-            List<Double> accelYaws = new ArrayList<>();
-            List<Double> accelPitches = new ArrayList<>();
-            List<Double> gcdErrorsYaw = new ArrayList<>();
-            List<Double> gcdErrorsPitch = new ArrayList<>();
-
-            for (RawTrainingTick tick : window) {
-                deltaYaws.add((double) Math.abs(tick.deltaYaw));
-                deltaPitches.add((double) Math.abs(tick.deltaPitch));
-                accelYaws.add((double) Math.abs(tick.accelYaw));
-                accelPitches.add((double) Math.abs(tick.accelPitch));
-                gcdErrorsYaw.add((double) tick.gcdErrorYaw);
-                gcdErrorsPitch.add((double) tick.gcdErrorPitch);
+        // Для регрессии используем только легит данные!
+        // Фильтруем, оставляя только легит тики
+        List<RawTrainingTick> legitTicks = new ArrayList<>();
+        for (RawTrainingTick tick : rawTicks) {
+            if (tick.isCheat < 0.5) {  // isCheat == 0.0 для легит
+                legitTicks.add(tick);
             }
-
-            // Feature 0-1: Средняя скорость
-            features[0] = average(deltaYaws);
-            features[1] = average(deltaPitches);
-
-            // Feature 2-3: Стандартное отклонение скорости
-            features[2] = standardDeviation(deltaYaws);
-            features[3] = standardDeviation(deltaPitches);
-
-            // Feature 4-5: Максимальная скорость
-            features[4] = deltaYaws.isEmpty() ? 0 : Collections.max(deltaYaws);
-            features[5] = deltaPitches.isEmpty() ? 0 : Collections.max(deltaPitches);
-
-            // Feature 6-7: Среднее ускорение
-            features[6] = average(accelYaws);
-            features[7] = average(accelPitches);
-
-            // Feature 8-9: Стандартное отклонение ускорения
-            features[8] = standardDeviation(accelYaws);
-            features[9] = standardDeviation(accelPitches);
-
-            // Feature 10-11: Средняя GCD-ошибка
-            features[10] = average(gcdErrorsYaw);
-            features[11] = average(gcdErrorsPitch);
-
-            // Feature 12: Процент нулевых движений
-            features[12] = deltaYaws.stream().filter(d -> d < 0.01).count() / (double) deltaYaws.size();
-
-            // Feature 13: Процент резких движений (>20 градусов)
-            features[13] = deltaYaws.stream().filter(d -> d > 20).count() / (double) deltaYaws.size();
-
-            // Feature 14: Энтропия движений
-            features[14] = calculateEntropy(deltaYaws);
-
-            // Feature 15: Коэффициент вариации
-            features[15] = features[2] / (features[0] + 0.001);
-
-            // Feature 16: Паттерн "снапа"
-            features[16] = detectSnapPattern(deltaYaws);
-
-            // Feature 17-18: Квантили (25% и 75%)
-            features[17] = percentile(deltaYaws, 0.25);
-            features[18] = percentile(deltaYaws, 0.75);
-
-            // Feature 19: Константная скорость
-            features[19] = detectConstantSpeedPattern(deltaYaws);
-
-            // Feature 20: Корреляция yaw/pitch
-            features[20] = calculateCorrelation(deltaYaws, deltaPitches);
-
-            // Feature 21: Среднее соотношение GCD-ошибки к движению
-            features[21] = features[10] / (features[0] + 0.001);
-
-            // Feature 22: Максимальное ускорение
-            features[22] = accelYaws.isEmpty() ? 0 : Collections.max(accelYaws);
-
-            // Feature 23: Процент идеально прямых углов (используем deltaYaws)
-            features[23] = countPerfectAnglesFromDeltas(deltaYaws) / (double) deltaYaws.size();
-
-            // Берём метку (cheat или legit) из последнего тика в окне
-            double label = window.get(window.size() - 1).isCheat;
-
-            // Проверка на NaN/Infinity
-            for (int j = 0; j < features.length; j++) {
-                if (Double.isNaN(features[j]) || Double.isInfinite(features[j])) {
-                    features[j] = 0.0;
-                }
-            }
-
-            trainingExamples.add(new AimModel_SMART.TrainingExample(features, label));
         }
 
-        System.out.println("[GrimAC ML] Вычислено обучающих примеров: " + trainingExamples.size() + " из " + rawTicks.size() + " тиков");
+        System.out.println("[GrimAC ML] Из " + rawTicks.size() + " тиков отфильтровано " + legitTicks.size() + " легит тиков");
+
+        // Разбиваем тики на окна по 40 и создаём примеры регрессии
+        int windowSize = SEQUENCE_LENGTH;
+        if (legitTicks.size() < windowSize + 1) {
+            System.out.println("[GrimAC ML] Недостаточно легит тиков для обучения! Нужно минимум " + (windowSize + 1));
+            return trainingExamples;
+        }
+
+        int numWindows = legitTicks.size() - windowSize;
+
+        for (int i = 0; i < numWindows; i++) {
+            int startIdx = i;
+            int endIdx = startIdx + windowSize;
+
+            // Создаём последовательность [40][8]
+            double[][] sequence = new double[windowSize][NUM_FEATURES];
+
+            for (int t = 0; t < windowSize; t++) {
+                RawTrainingTick tick = legitTicks.get(startIdx + t);
+                sequence[t][0] = tick.deltaYaw;
+                sequence[t][1] = tick.deltaPitch;
+                sequence[t][2] = tick.accelYaw;
+                sequence[t][3] = tick.accelPitch;
+                sequence[t][4] = tick.jerkYaw;
+                sequence[t][5] = tick.jerkPitch;
+                sequence[t][6] = tick.gcdErrorYaw;
+                sequence[t][7] = tick.gcdErrorPitch;
+            }
+
+            // Следующий тик (label)
+            RawTrainingTick nextTick = legitTicks.get(endIdx);
+            double[] label = new double[]{nextTick.deltaYaw, nextTick.deltaPitch};
+
+            trainingExamples.add(new SmartAimModel.TrainingExample(sequence, label));
+        }
+
+        System.out.println("[GrimAC ML] Создано " + trainingExamples.size() + " обучающих примеров для регрессии");
         return trainingExamples;
     }
 
 
 
     /**
-     * Обучить модель
+     * Обучить модель (регрессия для предсказания следующего тика)
      */
     public static String trainModel() {
         try {
@@ -1031,11 +1006,11 @@ public class ImprovedAimML extends Check implements RotationCheck {
             }
 
             System.out.println("[GrimAC ML] ═══════════════════════════════════");
-            System.out.println("[GrimAC ML] НАЧАЛО ОБУЧЕНИЯ МОДЕЛИ");
+            System.out.println("[GrimAC ML] НАЧАЛО ОБУЧЕНИЯ РЕГРЕССИОННОЙ МОДЕЛИ");
             System.out.println("[GrimAC ML] ═══════════════════════════════════");
             System.out.println("[GrimAC ML] Найдено файлов: " + csvFiles.length);
 
-            // Загружаем все данные (raw тики для вычисления 24 фичей)
+            // Загружаем все данные (raw тики)
             List<RawTrainingTick> allRawData = new ArrayList<>();
             int legitCount = 0;
             int cheatCount = 0;
@@ -1090,11 +1065,11 @@ public class ImprovedAimML extends Check implements RotationCheck {
                 }
             }
 
-            // Группируем тики по игрокам для расчёта 24 фичей
-            List<AimModel_SMART.TrainingExample> allData = compute24FeaturesFromRawTicks(allRawData);
+            // Создаём обучающие примеры для регрессии (используются только легит данные!)
+            List<SmartAimModel.TrainingExample> allData = computeRegressionExamplesFromRawTicks(allRawData);
 
             if (allData.isEmpty()) {
-                return "§c[GrimAC ML] Не удалось загрузить данные из CSV!";
+                return "§c[GrimAC ML] Не удалось создать обучающие примеры (нужно больше легит данных)!";
             }
 
             if (allData.size() < MIN_SAMPLES_FOR_TRAINING) {
@@ -1106,37 +1081,27 @@ public class ImprovedAimML extends Check implements RotationCheck {
 
             System.out.println("[GrimAC ML] ═══════════════════════════════════");
             System.out.println("[GrimAC ML] Всего примеров: " + allData.size());
-            System.out.println("[GrimAC ML] Легитных: " + legitCount);
-            System.out.println("[GrimAC ML] Читеров: " + cheatCount);
+            System.out.println("[GrimAC ML] Загружено тиков: " + allRawData.size());
+            System.out.println("[GrimAC ML] Легитных тиков: " + legitCount);
+            System.out.println("[GrimAC ML] Читерских тиков: " + cheatCount + " (используются только легит для обучения)");
             System.out.println("[GrimAC ML] ═══════════════════════════════════");
-
-            // Балансировка классов (если нужно)
-            if (Math.abs(legitCount - cheatCount) > allData.size() * 0.3) {
-                System.out.println("[GrimAC ML] ⚠ Дисбаланс классов обнаружен!");
-                allData = balanceDataset(allData);
-                System.out.println("[GrimAC ML] ✓ Данные сбалансированы: " + allData.size() + " примеров");
-            }
 
             // Перемешиваем данные
             Collections.shuffle(allData, new Random(42));
 
             // Разделяем на train/validation (80/20)
             int trainSize = (int) (allData.size() * 0.8);
-            List<AimModel_SMART.TrainingExample> trainData = allData.subList(0, trainSize);
-            List<AimModel_SMART.TrainingExample> validData = allData.subList(trainSize, allData.size());
+            List<SmartAimModel.TrainingExample> trainData = allData.subList(0, trainSize);
+            List<SmartAimModel.TrainingExample> validData = allData.subList(trainSize, allData.size());
 
             System.out.println("[GrimAC ML] Обучающая выборка: " + trainData.size());
             System.out.println("[GrimAC ML] Валидационная выборка: " + validData.size());
 
-            // Создаём и обучаем модель
-            int numFeatures = allData.get(0).features.length;
-            AimModel_SMART model = new AimModel_SMART(numFeatures);
+            // Создаём и обучаем регрессионную модель
+            SmartAimModel model = new SmartAimModel();
+            int maxEpochs = 100;
 
-            double learningRate = 0.005;      // было 0.01 → стало 0.05
-            double l2Lambda = 0.1;        // было 0.001 → стало 0.0001
-            int maxIterations = 150;        // было 500 → стало 1000
-
-            model.train(trainData, validData, learningRate, l2Lambda, maxIterations);
+            model.train(trainData, validData, maxEpochs);
 
             // Сохраняем модель
             File modelDir = new File(MODEL_FILE).getParentFile();
@@ -1145,59 +1110,40 @@ public class ImprovedAimML extends Check implements RotationCheck {
             }
             model.save(MODEL_FILE);
 
+            // Экспортируем веса в JSON для использования в Grim
+            model.exportToJson(MODEL_JSON_FILE);
+
             // Обновляем глобальную модель
             trainedModel = model;
 
             System.out.println("[GrimAC ML] ═══════════════════════════════════");
             System.out.println("[GrimAC ML] ОБУЧЕНИЕ ЗАВЕРШЕНО УСПЕШНО!");
-            System.out.println("[GrimAC ML] " + model.getMetrics());
+            System.out.println("[GrimAC ML] Validation MSE: " + String.format("%.6f", model.getValidationMSE()));
+            System.out.println("[GrimAC ML] Validation MAE: " + String.format("%.6f", model.getValidationMAE()));
+            System.out.println("[GrimAC ML] Параметров: " + model.getNumParams());
             System.out.println("[GrimAC ML] ═══════════════════════════════════");
 
             return String.format(
-                    "§a[GrimAC ML] Модель обучена успешно!\n" +
+                    "§a[GrimAC ML] Регрессионная модель обучена успешно!\n" +
                             "§7Использовано файлов: §e%d\n" +
-                            "§7Примеров: §e%d §7(Легит: §a%d§7, Читы: §c%d§7)\n" +
-                            "§7%s",
+                            "§7Загружено тиков: §e%d §7(Легит: §a%d§7, Читы: §c%d§7)\n" +
+                            "§7Обучающих примеров: §e%d\n" +
+                            "§7Validation MSE: §e%.6f\n" +
+                            "§7Validation MAE: §e%.6f\n" +
+                            "§7Веса экспортированы: §a" + MODEL_JSON_FILE,
                     csvFiles.length,
-                    allData.size(),
+                    allRawData.size(),
                     legitCount,
                     cheatCount,
-                    model.getMetrics()
+                    allData.size(),
+                    model.getValidationMSE(),
+                    model.getValidationMAE()
             );
 
         } catch (Exception e) {
             e.printStackTrace();
             return "§c[GrimAC ML] Ошибка обучения: " + e.getMessage();
         }
-    }
-
-    private static List<AimModel_SMART.TrainingExample> balanceDataset(
-            List<AimModel_SMART.TrainingExample> data) {
-
-        List<AimModel_SMART.TrainingExample> legitExamples = new ArrayList<>();
-        List<AimModel_SMART.TrainingExample> cheatExamples = new ArrayList<>();
-
-        // Разделяем на классы
-        for (AimModel_SMART.TrainingExample ex : data) {
-            if (ex.label > 0.5) {
-                cheatExamples.add(ex);
-            } else {
-                legitExamples.add(ex);
-            }
-        }
-
-        // Находим минимальный размер
-        int minSize = Math.min(legitExamples.size(), cheatExamples.size());
-
-        // Берём равное количество из каждого класса
-        List<AimModel_SMART.TrainingExample> balanced = new ArrayList<>();
-        Collections.shuffle(legitExamples);
-        Collections.shuffle(cheatExamples);
-
-        balanced.addAll(legitExamples.subList(0, minSize));
-        balanced.addAll(cheatExamples.subList(0, minSize));
-
-        return balanced;
     }
 
 
@@ -1208,10 +1154,12 @@ public class ImprovedAimML extends Check implements RotationCheck {
         try {
             File modelFile = new File(MODEL_FILE);
             if (modelFile.exists()) {
-                trainedModel = AimModel_SMART.load(MODEL_FILE);
+                trainedModel = SmartAimModel.load(MODEL_FILE);
                 System.out.println("[GrimAC ML] ═══════════════════════════════════");
-                System.out.println("[GrimAC ML] Модель загружена: " + MODEL_FILE);
-                System.out.println("[GrimAC ML] " + trainedModel.getMetrics());
+                System.out.println("[GrimAC ML] Регрессионная модель загружена: " + MODEL_FILE);
+                System.out.println("[GrimAC ML] Validation MSE: " + String.format("%.6f", trainedModel.getValidationMSE()));
+                System.out.println("[GrimAC ML] Validation MAE: " + String.format("%.6f", trainedModel.getValidationMAE()));
+                System.out.println("[GrimAC ML] Параметров: " + trainedModel.getNumParams());
                 System.out.println("[GrimAC ML] ═══════════════════════════════════");
             } else {
                 System.out.println("[GrimAC ML] Модель не найдена, работаем в режиме сбора данных");
