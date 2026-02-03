@@ -7,11 +7,10 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
-import org.bukkit.inventory.InventoryView;
 
 /**
  * Обработчик событий для ML GUI меню
- * ИСПРАВЛЕНО: Использует bridge для удаления голограмм
+ * FIXED: Использует getTitle() вместо title()
  */
 public class MLMenuListener implements Listener {
 
@@ -21,8 +20,8 @@ public class MLMenuListener implements Listener {
             return;
         }
 
-        InventoryView view = event.getView();
-        String title = view.title().toString();
+        // ФИКС: Используем getTitle() вместо title()
+        String title = event.getView().getTitle();
 
         if (!title.contains("Курятник")) {
             return;
@@ -45,8 +44,8 @@ public class MLMenuListener implements Listener {
             return;
         }
 
-        InventoryView view = event.getView();
-        String title = view.title().toString();
+        // ФИКС: Используем getTitle() вместо title()
+        String title = event.getView().getTitle();
 
         if (title.contains("Курятник")) {
             MLMenuGUI.removeViewer(player.getUniqueId());

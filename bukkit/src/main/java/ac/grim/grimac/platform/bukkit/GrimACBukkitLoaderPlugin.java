@@ -54,8 +54,15 @@ import org.incendo.cloud.paper.LegacyPaperCommandManager;
 
 // ========== ML SYSTEM IMPORTS ==========
 import ac.grim.grimac.platform.bukkit.player.MLMenuListener;
+import ac.grim.grimac.platform.bukkit.player.MLConfig;
+import ac.grim.grimac.platform.bukkit.player.PenaltySystem;
 // ========================================
 
+/**
+ * УЛУЧШЕННЫЙ загрузчик GrimAC с интеграцией ML системы
+ *
+ * @version 2.0 (Purpur 1.21.1)
+ */
 public final class GrimACBukkitLoaderPlugin extends JavaPlugin implements PlatformLoader {
 
     public static GrimACBukkitLoaderPlugin LOADER;
@@ -73,6 +80,11 @@ public final class GrimACBukkitLoaderPlugin extends JavaPlugin implements Platfo
     @Getter private final PlatformServer platformServer = new BukkitPlatformServer();
     @Getter private final MessagePlaceHolderManager messagePlaceHolderManager = new BukkitMessagePlaceHolderManager();
     @Getter private final BukkitPermissionRegistrationManager permissionManager = new BukkitPermissionRegistrationManager();
+
+    // ========== ML SYSTEM COMPONENTS ==========
+    private MLConfig mlConfig;
+    private PenaltySystem penaltySystem;
+    // ==========================================
 
     public GrimACBukkitLoaderPlugin() {
         BukkitResolverRegistrar registrar = new BukkitResolverRegistrar();
@@ -104,25 +116,76 @@ public final class GrimACBukkitLoaderPlugin extends JavaPlugin implements Platfo
     public void onEnable() {
         GrimAPI.INSTANCE.start();
 
+        // ========== ML SYSTEM INITIALIZATION ==========
         try {
-            MLBridgeInitializer.initialize(this);
-            getServer().getPluginManager().registerEvents(new MLMenuListener(), this);
+            getLogger().info("╔═══════════════════════════════════════════════════");
+            getLogger().info("║  [GrimAC ML] Initializing ML System v2.0          ");
+            getLogger().info("╚═══════════════════════════════════════════════════");
 
-            getLogger().info("[GrimAC ML] System initialized!");
+            // 1. Инициализация конфигурации
+            mlConfig = new MLConfig(this);
+            getLogger().info("[GrimAC ML] ✓ Config loaded");
+
+            // 2. Инициализация системы наказаний
+            penaltySystem = new PenaltySystem(this);
+
+            // Применяем настройки из конфига
+            penaltySystem.setMinProbability(mlConfig.getAIThreshold());
+            penaltySystem.setVLDecayEnabled(true);
+            penaltySystem.setVLDecayAmount(1);
+            penaltySystem.setVLDecayInterval(60);
+
+            getLogger().info("[GrimAC ML] ✓ PenaltySystem initialized");
+
+            // 3. Передаем instances в MLCommandRegistrar
+            MLCommandRegistrar.setInstances(mlConfig, penaltySystem);
+            getLogger().info("[GrimAC ML] ✓ Command instances registered");
+
+            // 4. Инициализация Bridge (голограммы)
+            MLBridgeInitializer.initialize(this);
+            getLogger().info("[GrimAC ML] ✓ Hologram bridge initialized");
+
+            // 5. Регистрация listeners
+            getServer().getPluginManager().registerEvents(new MLMenuListener(), this);
+            getLogger().info("[GrimAC ML] ✓ GUI listeners registered");
+
+            getLogger().info("╔═══════════════════════════════════════════════════");
+            getLogger().info("║  [GrimAC ML] System initialized successfully!     ");
+            getLogger().info("║  Commands: /grimml help                           ");
+            getLogger().info("╚═══════════════════════════════════════════════════");
+
         } catch (Exception e) {
+            getLogger().severe("╔═══════════════════════════════════════════════════");
+            getLogger().severe("║  [GrimAC ML] INITIALIZATION FAILED!               ");
+            getLogger().severe("╚═══════════════════════════════════════════════════");
             e.printStackTrace();
         }
+        // ==============================================
     }
 
     @Override
     public void onDisable() {
-        // ========== ML SYSTEM ==========
+        // ========== ML SYSTEM SHUTDOWN ==========
         try {
+            getLogger().info("[GrimAC ML] Shutting down ML System...");
+
+            // 1. Shutdown PenaltySystem
+            if (penaltySystem != null) {
+                penaltySystem.shutdown();
+                getLogger().info("[GrimAC ML] ✓ PenaltySystem shutdown");
+            }
+
+            // 2. Shutdown Bridge
             MLBridgeInitializer.shutdown();
+            getLogger().info("[GrimAC ML] ✓ Bridge shutdown");
+
+            getLogger().info("[GrimAC ML] ML System shutdown complete");
+
         } catch (Exception e) {
+            getLogger().severe("[GrimAC ML] Error during shutdown:");
             e.printStackTrace();
         }
-        // ================================
+        // ========================================
 
         GrimAPI.INSTANCE.stop();
     }
@@ -211,7 +274,6 @@ public final class GrimACBukkitLoaderPlugin extends JavaPlugin implements Platfo
         });
 
         eventBus.subscribe(context, ac.grim.grimac.api.event.events.CompletePredictionEvent.class, (event) -> {
-            // Note: New event doesn't have verbose, passing null or check name is standard fallback
             ac.grim.grimac.api.events.CompletePredictionEvent bukkitEvent =
                     new ac.grim.grimac.api.events.CompletePredictionEvent(
                             event.getUser(),
@@ -251,6 +313,8 @@ public final class GrimACBukkitLoaderPlugin extends JavaPlugin implements Platfo
                 ExecutionCoordinator.simpleCoordinator(),
                 senderFactory.get()
         );
+
+        // ВАЖНО: Регистрируем ML команды
         MLCommandRegistrar.register(manager);
 
         if (manager.hasCapability(CloudBukkitCapabilities.NATIVE_BRIGADIER)) {
@@ -270,4 +334,14 @@ public final class GrimACBukkitLoaderPlugin extends JavaPlugin implements Platfo
     public BukkitSenderFactory getBukkitSenderFactory() {
         return LOADER.senderFactory.get();
     }
+
+    // ========== ML SYSTEM GETTERS ==========
+    public MLConfig getMLConfig() {
+        return mlConfig;
+    }
+
+    public PenaltySystem getPenaltySystem() {
+        return penaltySystem;
+    }
+    // =======================================
 }

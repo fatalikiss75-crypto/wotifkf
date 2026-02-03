@@ -1013,18 +1013,7 @@ public class ImprovedAimML extends Check implements RotationCheck {
         return trainingExamples;
     }
 
-    /**
-     * Считает идеально прямые углы для обучения
-     */
-    private static double countPerfectAnglesFromDeltas(List<Double> deltas) {
-        long count = 0;
-        for (double y : deltas) {
-            if (Math.abs(y % 90) < 0.1 || Math.abs(y) < 0.1) {
-                count++;
-            }
-        }
-        return count;
-    }
+
 
     /**
      * Обучить модель
@@ -1143,9 +1132,9 @@ public class ImprovedAimML extends Check implements RotationCheck {
             int numFeatures = allData.get(0).features.length;
             AimModel_SMART model = new AimModel_SMART(numFeatures);
 
-            double learningRate = 0.05;      // было 0.01 → стало 0.05
-            double l2Lambda = 0.0001;        // было 0.001 → стало 0.0001
-            int maxIterations = 1000;        // было 500 → стало 1000
+            double learningRate = 0.005;      // было 0.01 → стало 0.05
+            double l2Lambda = 0.1;        // было 0.001 → стало 0.0001
+            int maxIterations = 150;        // было 500 → стало 1000
 
             model.train(trainData, validData, learningRate, l2Lambda, maxIterations);
 
